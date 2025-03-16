@@ -67,3 +67,14 @@ impl fmt::Display for RedisError {
         write!(f, "{d}")
     }
 }
+
+#[macro_export]
+macro_rules! redis_error {
+    ($str:literal) => {
+        return Err(RedisError::Str($str))
+    };
+
+    ($($arg:tt)*) => {
+        return Err(RedisError::String(format!($($arg)*)))
+    };
+}

@@ -587,23 +587,6 @@ where
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[inline]
-pub fn hash_set(key: *mut RedisModuleKey, field: &str, value: *mut RedisModuleString) -> Status {
-    let field = CString::new(field).unwrap();
-
-    unsafe {
-        RedisModule_HashSet.unwrap()(
-            key,
-            REDISMODULE_HASH_CFIELDS as i32,
-            field.as_ptr(),
-            value,
-            ptr::null::<c_char>(),
-        )
-        .into()
-    }
-}
-
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[inline]
 pub fn hash_del(key: *mut RedisModuleKey, field: &str) -> Status {
     let field = CString::new(field).unwrap();
 

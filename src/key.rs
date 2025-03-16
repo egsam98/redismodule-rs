@@ -1,4 +1,4 @@
-use std::convert::TryFrom;
+use std::{convert::TryFrom, ops::RangeBounds};
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::os::raw::c_void;
@@ -6,12 +6,13 @@ use std::ptr;
 use std::ptr::NonNull;
 use std::time::Duration;
 
-use libc::size_t;
+use libc::{c_char, size_t};
+use nix::errno::Errno;
 use std::os::raw::c_int;
 
 use raw::KeyType;
 
-use crate::native_types::RedisType;
+use crate::{native_types::RedisType, redis_error, zset::{ZAddFlags, ZAddResult, ZSetScoreIterator}, Status, REDISMODULE_HASH_DELETE};
 use crate::raw;
 use crate::redismodule::REDIS_OK;
 pub use crate::redisraw::bindings::*;
@@ -182,6 +183,12 @@ impl RedisKey {
     ) -> Result<StreamIterator, RedisError> {
         StreamIterator::new(self, from, to, exclusive, reverse)
     }
+
+    // `ZRANGE BYSCORE` with its bounds.
+    // `last` flag indicates if the last element of the range is selected for the start of the iteration.
+    pub fn zset_score_range(&self, range: impl RangeBounds<f64>, last: bool) -> RedisResult<ZSetScoreIterator> {
+        ZSetScoreIterator::new(self, range, last)
+    }
 }
 
 impl Drop for RedisKey {
@@ -249,14 +256,31 @@ impl RedisKeyWritable {
         StringDMA::new(self)
     }
 
-    #[allow(clippy::must_use_candidate)]
-    pub fn hash_set(&self, field: &str, value: RedisString) -> raw::Status {
-        raw::hash_set(self.key_inner, field, value.inner)
+    // HSET
+    pub fn hash_set(&self, field: &RedisString, value: &RedisString, flags: HashSetFlags) -> RedisResult<usize> {
+        self.raw_hash_set(field.inner, value.inner, flags)
     }
 
-    #[allow(clippy::must_use_candidate)]
-    pub fn hash_del(&self, field: &str) -> raw::Status {
-        raw::hash_del(self.key_inner, field)
+    // HDEL
+    pub fn hash_del(&self, field: &RedisString) -> RedisResult<bool> {
+        let n = self.raw_hash_set(field.inner, REDISMODULE_HASH_DELETE.cast_mut(), HashSetFlags::empty())?;
+        Ok(n > 0)
+    }
+
+    fn raw_hash_set(&self, field: *mut RedisModuleString, value: *mut RedisModuleString, flags: HashSetFlags) -> RedisResult<usize> {
+        Errno::clear();
+        let n = unsafe { RedisModule_HashSet.unwrap()(
+            self.key_inner,
+            flags.bits(),
+            field,
+            value,
+            ptr::null::<c_char>(),
+        )};
+
+        match Errno::last() {
+            Errno::UnknownErrno | Errno::ENOENT => Ok(n as usize),
+            errno => redis_error!("{}", errno), 
+        }
     }
 
     pub fn hash_get(&self, field: &str) -> Result<Option<RedisString>, RedisError> {
@@ -447,6 +471,31 @@ impl RedisKeyWritable {
             Err(RedisError::Str("Failed trimming the stream"))
         } else {
             Ok(res as usize)
+        }
+    }
+
+    // `ZADD`
+    pub fn zset_add(&self, score: f64, value: &RedisString, flags: ZAddFlags) -> RedisResult<ZAddResult> {
+        let mut flags_raw = flags.bits();
+        let status: Status = unsafe { RedisModule_ZsetAdd.unwrap()(self.key_inner, score, value.inner, &mut flags_raw).into() };
+        match status {
+            Status::Ok => match flags_raw {
+                b if b & REDISMODULE_ZADD_ADDED as i32 != 0 => Ok(ZAddResult::Added),
+                b if b & REDISMODULE_ZADD_UPDATED as i32 != 0 => Ok(ZAddResult::Updated),
+                b if b & REDISMODULE_ZADD_NOP as i32 != 0 => Ok(ZAddResult::Nop),
+                b => redis_error!("unexpected return bits value: {}", b),
+            },
+            Status::Err => redis_error!("ZADD error"),
+        }
+    }
+
+    // `ZREM`
+    pub fn zset_rem(&self, value: &RedisString) -> RedisResult<bool> {
+        let mut deleted = 0;
+        let status: Status = unsafe { RedisModule_ZsetRem.unwrap()(self.key_inner, value.inner, &mut deleted).into() };
+        match status {
+            Status::Ok => Ok(deleted != 0),
+            Status::Err => redis_error!("ZREM error"),
         }
     }
 }
@@ -682,4 +731,19 @@ pub fn verify_type(key_inner: *mut raw::RedisModuleKey, redis_type: &RedisType) 
     }
 
     REDIS_OK
+}
+
+bitflags! {
+    #[derive(Default)]
+    pub struct HashSetFlags: c_int {
+        const NONE = REDISMODULE_HASH_NONE as c_int;
+        // The operation is performed only if the field was not already existing in the hash.
+        const NX = REDISMODULE_HASH_NX as c_int;
+        // The operation is performed only if the field was already existing, so that a new value could be
+        // associated to an existing filed, but no new fields are created.
+        const XX = REDISMODULE_HASH_XX as c_int;
+        // Include the number of inserted fields in the returned number, in addition to the number of
+        // updated and deleted fields. (Added in Redis 6.2.)
+        const COUNT_ALL = REDISMODULE_HASH_COUNT_ALL as c_int;
+    }
 }

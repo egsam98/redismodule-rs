@@ -1700,6 +1700,7 @@ static int RedisModule_InitAPI(RedisModuleCtx *ctx) {
     REDISMODULE_GET_API(RdbLoad);
     REDISMODULE_GET_API(RdbSave);
     REDISMODULE_GET_API(GetInternalSecret);
+    return REDISMODULE_OK;
 }
 static int RedisModule_Init(RedisModuleCtx *ctx, const char *name, int ver, int apiver) {
     RedisModule_InitAPI(ctx);
